@@ -50,6 +50,151 @@ from typing import (
 import warnings
 
 import psutil
+if os.name == "nt":
+    #
+    # In MS-WINDOWS default behavior is to not terminate children when parent
+    # process terminates. This block sets up system API wrappers to invoke
+    # win32 APIs needed to setup automatic termination of MAPDL when python
+    # ends, which is what happens in Linux.
+    #
+    # This block defines asgnjb() which:
+    #
+    # 1) Creates a job object with CreateJobObjectW()
+    #
+    # 2) Configures the job object to terminate its process with the parent
+    #    with SetInformationJobObject()
+    #
+    # 3) Gets a process handle for the process ID with OpenProcess()
+    #
+    # 4) Assigns the process to the job using handles obtained in (1) and (3)
+    #    using AssignProcessToJobObject()
+    #
+    # Remark: using ctypes to avoid pulling in more random PyPI packages.
+    #
+    import ctypes
+
+    # https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information
+    #
+    # typedef struct _JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    #   LARGE_INTEGER PerProcessUserTimeLimit;
+    #   LARGE_INTEGER PerJobUserTimeLimit;
+    #   DWORD         LimitFlags;
+    #   SIZE_T        MinimumWorkingSetSize;
+    #   SIZE_T        MaximumWorkingSetSize;
+    #   DWORD         ActiveProcessLimit;
+    #   ULONG_PTR     Affinity;
+    #   DWORD         PriorityClass;
+    #   DWORD         SchedulingClass;
+    # } JOBOBJECT_BASIC_LIMIT_INFORMATION, *PJOBOBJECT_BASIC_LIMIT_INFORMATION;
+    #
+    class b_info_s(ctypes.Structure):
+        _fields_ = [ ("x1", ctypes.wintypes.LARGE_INTEGER),
+                     ("x2", ctypes.wintypes.LARGE_INTEGER),
+                     ("LimitFlags", ctypes.wintypes.DWORD),
+                     ("x3", ctypes.c_size_t),
+                     ("x4", ctypes.c_size_t),
+                     ("x5", ctypes.wintypes.DWORD),
+                     ("x6", ctypes.wintypes.LPVOID),
+                     ("x7", ctypes.wintypes.DWORD),
+                     ("x8", ctypes.wintypes.DWORD) ]
+
+    # https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-io_counters
+    #
+    # typedef struct _IO_COUNTERS {
+    #   ULONGLONG ReadOperationCount;
+    #   ULONGLONG WriteOperationCount;
+    #   ULONGLONG OtherOperationCount;
+    #   ULONGLONG ReadTransferCount;
+    #   ULONGLONG WriteTransferCount;
+    #   ULONGLONG OtherTransferCount;
+    # } IO_COUNTERS;
+    #
+    class io_counters_s(ctypes.Structure):
+        _fields_ = [ ("x1", ctypes.c_ulonglong),
+                     ("x2", ctypes.c_ulonglong),
+                     ("x3", ctypes.c_ulonglong),
+                     ("x4", ctypes.c_ulonglong),
+                     ("x5", ctypes.c_ulonglong),
+                     ("x6", ctypes.c_ulonglong) ]
+
+    # https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information
+    #
+    # typedef struct _JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    #   JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+    #   IO_COUNTERS                       IoInfo;
+    #   SIZE_T                            ProcessMemoryLimit;
+    #   SIZE_T                            JobMemoryLimit;
+    #   SIZE_T                            PeakProcessMemoryUsed;
+    #   SIZE_T                            PeakJobMemoryUsed;
+    # } JOBOBJECT_EXTENDED_LIMIT_INFORMATION, *PJOBOBJECT_EXTENDED_LIMIT_INFORMATION;
+    #
+    class e_info_s(ctypes.Structure):
+        _fields_ = [ ("BasicLimitInformation", b_info_s),
+                     ("x1", io_counters_s),
+                     ("x2", ctypes.c_size_t),
+                     ("x3", ctypes.c_size_t),
+                     ("x4", ctypes.c_size_t),
+                     ("x5", ctypes.c_size_t)  ]
+
+    # All functions for process handling and job objects are in kernel32
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+    # Setup CreateJobObjectW wrapper
+    k32.CreateJobObjectW.argtypes = [ ctypes.wintypes.LPVOID,
+                                      ctypes.wintypes.LPCWSTR ]
+    k32.CreateJobObjectW.restype = ctypes.wintypes.HANDLE
+
+    # Setup SetInformationJobObject wrapper
+    k32.SetInformationJobObject.argtypes = [ ctypes.wintypes.HANDLE,
+                                             ctypes.c_int,
+                                             ctypes.POINTER(e_info_s),
+                                             ctypes.wintypes.DWORD
+                                           ]
+    k32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
+
+    # Setup the OpenProcess wrapper
+    k32.OpenProcess.argtypes = [ ctypes.wintypes.DWORD,
+                                 ctypes.wintypes.BOOL,
+                                 ctypes.wintypes.DWORD ]
+    k32.OpenProcess.restype = ctypes.wintypes.HANDLE
+
+    # Setup the AssignProcessToJobObject wrapper
+    k32.AssignProcessToJobObject.argtypes = [ctypes.wintypes.HANDLE,
+                                             ctypes.wintypes.HANDLE]
+    k32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
+
+    # During initialization setup an anonymous job for the python session.
+    # Save the handle to jbh
+    jidh = k32.CreateJobObjectW(None, None)
+    if not jidh:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    # Set up a JOBOJBECT_BASIC_LIMIT_INFORMATION struct configuring for kill
+    # on close, which is LimitFlags = 0x00002000
+    b_kill_me = b_info_s(0, 0, 0x00002000, 0, 0, 0, 0, 0, 0)
+
+    # This is to pad out the JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    filler1 = io_counters_s(0, 0, 0, 0, 0, 0)
+
+    # Setup the JOBOBJECT_EXTENDED_LIMIT_INFORMATION struct
+    e_kill_me = e_info_s(b_kill_me, filler1, 0, 0, 0, 0)
+
+    # Even though we only set a basic field but it throws invalid parameter
+    # error unless we pass an extended structure. Microsoft, why? The value
+    # "9" tell SetInformationJobObject to expect an "EXTENDED" struct
+    ret = k32.SetInformationJobObject(jidh, 9, e_kill_me, ctypes.sizeof(e_info_s))
+    if not ret:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    # Assign a PID to the job. This configures the process to terminate with python
+    def asgnjb(xjidh,xpid):
+        # 0x0101 = set_quota | terminate
+        pidh = k32.OpenProcess(0x0101, False, xpid)
+        if not pidh:
+            raise ctypes.WinError(ctypes.get_last_error())
+        ret = k32.AssignProcessToJobObject(xjidh, pidh)
+        if not ret:
+            raise ctypes.WinError(ctypes.get_last_error())
 
 from ansys.mapdl import core as pymapdl
 from ansys.mapdl.core import _HAS_ATP, _HAS_PIM, LOG  # type: ignore
@@ -3050,7 +3195,7 @@ def submitter(
 
     # cmd is controlled by the library with generate_mapdl_launch_command.
     # Excluding bandit check.
-    return subprocess.Popen(
+    ret = subprocess.Popen(
         args=cmd,
         shell=shell,  # sbatch does not work without shell.
         cwd=cwd,
@@ -3059,7 +3204,9 @@ def submitter(
         stderr=stderr,
         env=env_vars,
     )
-
+    if os.name == "nt":
+        asgnjb(jidh, ret.pid)
+    return ret
 
 def check_console_start_parameters(start_parm: Dict[str, Any]) -> Dict[str, Any]:
     valid_args = [
