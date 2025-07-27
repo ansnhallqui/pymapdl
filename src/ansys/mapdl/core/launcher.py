@@ -1130,6 +1130,7 @@ def launch_mapdl(
     cleanup_on_exit: bool = True,
     clear_on_connect: bool = True,
     ip: Optional[str] = None,
+    iface: Optional[str] = "127.0.0.1",
     launch_on_hpc: bool = False,
     license_server_check: bool = False,
     license_type: Optional[bool] = None,
@@ -1764,6 +1765,10 @@ def launch_mapdl(
 
         try:
             #
+
+            iface_file = open(os.path.normpath(args["run_location"]) + "/mylocal.ip", "w")
+            iface_file.write(iface + "\n")
+            iface_file.close()
             process = launch_grpc(
                 cmd=cmd,
                 run_location=args["run_location"],
