@@ -211,8 +211,7 @@ if _initialized == False:
             if not ret:
                 raise ctypes.WinError(ctypes.get_last_error())
 
-        if multiprocessing.current_process().name == "MainProcess"
-            asgnjb(jidh, os.getpid())
+        asgnjb(jidh, os.getpid())
 
 from ansys.mapdl import core as pymapdl
 from ansys.mapdl.core import _HAS_ATP, _HAS_PIM, LOG  # type: ignore
@@ -3215,8 +3214,7 @@ def submitter(
         stderr = subprocess.PIPE
 
     elif os.name == "posix":
-        wrapper_path = os.path.dirname(os.path.abspath(__file__)) 
-            + "/" + "kill_process_family.py"
+        wrapper_path = os.path.dirname(os.path.abspath(__file__)) + "/" + "kill_process_family.py"
         cmd = [sys.executable, wrapper_path] + cmd
 
     # cmd is controlled by the library with generate_mapdl_launch_command.
